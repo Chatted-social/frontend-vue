@@ -5,7 +5,7 @@
       v-for="[i, u] of otherVideos"
       :key="i"
       autoplay
-      :ref="u"
+      :src="u"
       playsinline
     ></video>
   </div>
@@ -17,8 +17,8 @@ export default {
   name: "Room",
   data: () => ({
     userVideo: null,
-    otherVideos: null,
-    peers: [],
+    otherVideos: {},
+    peers: {},
     users: [],
     socket: null,
     userStream: null,
@@ -42,13 +42,27 @@ export default {
           s.on("join_room", (event) => {
             this.ID = event.user_id;
             console.log(event, "join_room");
+            this.users = event.other_users;
+            if (event.other_users.length < 2) {
+              return;
+            }
+            for (const x of event.other_users) {
+              if (x === this.ID){
+                continue
+              }
+              this.callUser(x.id)
+            }
           });
 
           s.on("new_user", (event) => {
             this.users.push(event.user_id);
           });
 
-          s.on("offer", this.handleRecieveCall);
+          s.on("offer", this.handleReceiveCall);
+
+          s.on("answer", this.handleAnswer);
+
+          s.on("ice-candidate", this.handleIceCandidateMsg);
 
           s.send("join_room", { room_id: id });
         });
@@ -58,9 +72,10 @@ export default {
 
   methods: {
     callUser(id) {
-      this.peers.push(this.createPeer(id));
+      this.peers[id] = this.createPeer(id);
       this.userStream.getTracks().forEach((track) => {
-        for (const peer of this.peers) {
+        // eslint-disable-next-line no-unused-vars
+        for (const [i, peer] of Object.entries(this.peers)) {
           peer.addTrack(track, this.userStream);
         }
       });
@@ -68,7 +83,7 @@ export default {
     createPeer(id) {
       const peer = new RTCPeerConnection({
         iceServers: [
-          { urls: "stun:stun.stunprotocol.org" },
+          { urls: "stun:stun.l.google.com:19302" },
           {
             urls: "turn:numb.viagenie.ca",
             credential: "muazkh",
@@ -76,19 +91,46 @@ export default {
           },
         ],
       });
+      peer.user_id = id;
+
+      this.otherVideos[peer.user_id] = new MediaStream();
+
       peer.onicecandidate = this.handleIceCandidate;
-      peer.ontrack = this.handleTrack;
+      peer.ontrack = (e) => {
+        this.otherVideos[peer.user_id] = e.streams[0];
+      };
       peer.onnegotiationneeded = () => this.handleNegotiation(id);
 
       return peer;
     },
 
-    handleIceCandidate() {},
+    handleIceCandidate(event) {
+      if (event.candidate) {
+        let id = this.ID;
+        const payload = {
+          target: event.target.user_id,
+          from: id,
+          candidate: event.candidate,
+        };
+        this.socket.send("ice-candidate", payload);
+      }
+    },
 
-    handleTrack() {},
+    handleIceCandidateMsg(event) {
+      console.log(event, event.from.toString(), this.peers);
+      // eslint-disable-next-line no-unused-vars
+      for (const [i,x] of Object.entries(this.peers)){
+        console.log(i === event.from);
+      }
+      const candidate = new RTCIceCandidate(event.candidate);
+      this.peers[event.from]
+        .addIceCandidate(candidate)
+        .catch((e) => console.error(e));
+    },
 
     handleNegotiation(id) {
-      for (const peer of this.peers) {
+      // eslint-disable-next-line no-unused-vars
+      for (const [i, peer] of Object.entries(this.peers)) {
         peer
           .createOffer()
           .then((offer) => {
@@ -106,7 +148,7 @@ export default {
       }
     },
 
-    handleRecieveCall(event) {
+    handleReceiveCall(event) {
       const peer = this.createPeer();
       const desc = new RTCSessionDescription(event.sdp);
       peer
@@ -128,7 +170,16 @@ export default {
             caller: this.ID,
             sdp: peer.localDescription,
           };
+          this.socket.send("answer", payload);
+          this.peers[event.caller] = peer;
         });
+    },
+    handleAnswer(event) {
+      const desc = new RTCSessionDescription(event.sdp);
+      this.peers[event.caller].setRemoteDescription(desc).catch((e) => {
+        console.error(e);
+        console.log(event, this.ID);
+      });
     },
   },
 };
